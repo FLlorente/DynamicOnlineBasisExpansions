@@ -15,7 +15,12 @@ from typing import Tuple
 
 
 class DOEBE(objax.Module):
-    def __init__(self, models: List[DOBE]):
+
+    def __init__(
+        self,
+        models: List[DOBE],
+        min_weight: float = 1e-16,
+    ):
         """Creates a (dynamic) online ensemble of basis expansions
 
         Args:
@@ -23,6 +28,7 @@ class DOEBE(objax.Module):
         """
         self.models = objax.ModuleList(models)
         self.w = objax.StateVar(jnp.ones(len(models)) / len(models))
+        self.min_weight = min_weight
 
     def pretrain(
         self,
@@ -199,15 +205,16 @@ class DOEBE(objax.Module):
         yhats = []
         cov_yhats = []
         ls = []
+        min_weight = self.min_weight
 
         # The strategy here is to separate calculation of weights and predictive densities
         # This allows for simple implementation with lax scans
         for j, model in enumerate(self.models):
             # if model is inactive, no need to calculate anything
-            if self.w[j] < 1e-16:
+            if self.w[j] < min_weight:
                 yhats.append(jnp.zeros((1, X.shape[0])))
                 cov_yhats.append(jnp.zeros((1, X.shape[0])))
-                ls.append(jnp.zeros((1, X.shape[0])))
+                ls.append(jnp.inf * jnp.ones((1, X.shape[0])))
                 continue
 
             yhat, cov_yhat, l = model.predict_and_update(X, y)
@@ -223,7 +230,7 @@ class DOEBE(objax.Module):
         # Next, use all predictive values to weight
         def _step_weights(carry, i):
             # Mark as inactive
-            log_w = jnp.where(carry < jnp.log(1e-16), -jnp.inf, carry)
+            log_w = jnp.where(carry < jnp.log(min_weight), -jnp.inf, carry)
 
             ell = -jax.scipy.special.logsumexp(log_w - ls[i - 1])
 
@@ -244,30 +251,37 @@ class DOEBE(objax.Module):
             axis=1,
         )
 
+        mixture_ls = jax.scipy.special.logsumexp(log_ws - ls, axis=1)
+
         if return_ws:
             return ymean, yvar, jnp.exp(log_ws)
         else:
-            return ymean, yvar
+            return ymean, yvar, mixture_ls
 
     def fit_minibatched(self, X, y, n_batch=2000):
         ymeans = []
         yvars = []
+        mixture_ls = []
+
         N = X.shape[0]
 
         for n in range(int(math.ceil(N / n_batch))):
-            if np.sum(self.w > 1 - 1e-16) > 0:
-                ymean, yvar = self.fit(X[n * n_batch :], y[n * n_batch :])
+            if np.sum(self.w > 1 - self.min_weight) > 0:
+                ymean, yvar, ml = self.fit(X[n * n_batch :], y[n * n_batch :])
                 ymeans.append(ymean)
                 yvars.append(yvar)
+                mixture_ls.append(ml)
                 break
 
-            ymean, yvar = self.fit(
+            ymean, yvar, ml = self.fit(
                 X[n * n_batch : (n + 1) * n_batch], y[n * n_batch : (n + 1) * n_batch]
             )
             ymeans.append(ymean)
             yvars.append(yvar)
+            mixture_ls.append(ml)
 
         ymean = jnp.concatenate(ymeans)
         yvar = jnp.concatenate(yvars)
+        mls = jnp.concatenate(mixture_ls)
 
-        return ymean, yvar
+        return ymean, yvar, mls

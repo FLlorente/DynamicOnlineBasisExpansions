@@ -92,7 +92,7 @@ def fit(models, X, y, n_pretrain=1000, n_batch=2500):
     yhats = []
     yvars = []
     for model in tqdm(models):
-        yhat, yvar = model.fit_minibatched(
+        yhat, yvar, _ = model.fit_minibatched(
             X[n_pretrain:], y[n_pretrain:], n_batch=n_batch
         )
         yhats.append(yhat)
