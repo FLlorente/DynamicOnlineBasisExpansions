@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cycler import K
+# from cycler import K
 import jax.numpy as jnp
 import jax
 
@@ -337,7 +337,19 @@ class DOLinear(DOBE):
         else:
             return X.T
 
+class DOLinear_selected(DOBE):
+    def __init__(self, d_in, var_theta, var_rw, var_eps, active_dimensions=np.array([0]), bias=True):
+        super().__init__(len(active_dimensions) + int(bias), d_in, var_theta, var_rw, var_eps)
+        self.bias = bias
+        self.active_dimensions = active_dimensions
 
+    def featurize(self, X: Float[Array, "N D"]) -> Float[Array, "D N"]:
+        X = X[:, self.active_dimensions].reshape(X.shape[0], -1)
+        if self.bias:
+            return jnp.vstack([X.T, jnp.ones(X.shape[0])])
+        else:
+            return X.T
+        
 class DOAddHSGP(DOBE):
     def __init__(
         self, L, M, d_in, lengthscale, var_theta, var_rw, var_eps, kernel_type="rbf"
