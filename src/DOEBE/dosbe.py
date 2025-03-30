@@ -28,6 +28,7 @@ class DOSBE(objax.Module):
         """
         self.models = objax.ModuleList(models)
         self.w = objax.StateVar(jnp.ones(len(models)) / len(models))
+        self.logw = objax.StateVar(jnp.log(jnp.ones(len(models)) / len(models)))
 
         available_strategies = ["eg", "eg_fixedshare"]
         if strategy.lower() not in available_strategies:
@@ -180,6 +181,7 @@ class DOSBE(objax.Module):
 
         # We added new models, so must redefine the weight vector
         self.w = objax.StateVar(jnp.ones(len(self.models)) / len(self.models))
+        self.logw = objax.StateVar(jnp.log(jnp.ones(len(self.models)) / len(self.models)))
 
         # We never updated the initial sigma_theta for each model
         for model_idx in range(len(self.models)):
@@ -298,11 +300,14 @@ class DOSBE(objax.Module):
             raise Exception(f"Strategy {self.strategy} not implemented!")
 
         final_log_w, log_ws = lax.scan(
-            _step_weights, jnp.log(self.w), jnp.arange(1, X.shape[0] + 1)
+            _step_weights, self.logw, jnp.arange(1, X.shape[0] + 1)
         )
 
-        log_ws = jnp.concatenate([self.w.reshape(1, -1), log_ws[:-1]], axis=0)
+        log_ws = jnp.concatenate([self.logw.reshape(1, -1), log_ws[:-1]], axis=0)
+        
+        # update final vector of weights and log-weights
         self.w = jnp.exp(final_log_w)
+        self.logw = final_log_w  # NEW
 
         ymean = jnp.sum(jnp.exp(log_ws) * yhat, axis=1)
         yvar = jnp.sum(
@@ -316,7 +321,7 @@ class DOSBE(objax.Module):
         else:
             return ymean, yvar, mixture_ls
 
-    def fit_minibatched(self, X, y, n_batch=2000):
+    def fit_minibatched(self, X, y, n_batch=2000,**kwargs):
         ymeans = []
         yvars = []
         mixture_ls = []
@@ -325,7 +330,8 @@ class DOSBE(objax.Module):
 
         for n in range(int(math.ceil(N / n_batch))):
             ymean, yvar, ml = self.fit(
-                X[n * n_batch : (n + 1) * n_batch], y[n * n_batch : (n + 1) * n_batch]
+                X[n * n_batch : (n + 1) * n_batch], y[n * n_batch : (n + 1) * n_batch],
+                **kwargs,
             )
             ymeans.append(ymean)
             yvars.append(yvar)

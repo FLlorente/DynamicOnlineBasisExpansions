@@ -28,6 +28,7 @@ class DOEBE(objax.Module):
         """
         self.models = objax.ModuleList(models)
         self.w = objax.StateVar(jnp.ones(len(models)) / len(models))
+        self.logw = objax.StateVar(jnp.log(jnp.ones(len(models)) / len(models)))
         self.min_weight = min_weight
 
     def pretrain(
@@ -172,6 +173,7 @@ class DOEBE(objax.Module):
 
         # We added new models, so must redefine the weight vector
         self.w = objax.StateVar(jnp.ones(len(self.models)) / len(self.models))
+        self.logw = objax.StateVar(jnp.log(jnp.ones(len(self.models)) / len(self.models)))  # NEW!!
 
         # We never updated the initial sigma_theta for each model
         for model_idx in range(len(self.models)):
@@ -180,7 +182,9 @@ class DOEBE(objax.Module):
             ].var_theta * jnp.eye(self.models[model_idx].n_features)
 
     def fit(
-        self, X: Float[Array, "N D"], y: Float[Array, "N 1"], return_ws=False
+        self, X: Float[Array, "N D"], y: Float[Array, "N 1"], return_ws=False,
+        weighting="bma", 
+        alpha=1e-2,  # learning rate of EG just for stacking
     ) -> Tuple[Float[Array, "N 1"], Float[Array, "N 1"]]:
         """Fits models according to (online) data `X` and `y`.
 
@@ -202,6 +206,7 @@ class DOEBE(objax.Module):
         Returns:
             Tuple[Float[Array, &quot;N 1&quot;], Float[Array, &quot;N 1&quot;]]: The mean and variance of the predictive distribution p(y_t | x_{1:t}, y_{1:t-1})
         """
+        print("using code in folder DynamicOnlineBasisExpansions, not DynamicOnlineBasisExpansions_old")
         yhats = []
         cov_yhats = []
         ls = []
@@ -221,29 +226,56 @@ class DOEBE(objax.Module):
 
             yhats.append(yhat)
             cov_yhats.append(cov_yhat)
-            ls.append(l)
+            ls.append(l)  # these are the negative log-density values of the predictive density
 
         yhat = jnp.vstack(yhats).T
         cov_yhat = jnp.vstack(cov_yhats).T
         ls = jnp.vstack(ls).T
 
-        # Next, use all predictive values to weight
-        def _step_weights(carry, i):
-            # Mark as inactive
-            log_w = jnp.where(carry < jnp.log(min_weight), -jnp.inf, carry)
+         # Next, use all predictive values to weight
 
-            ell = -jax.scipy.special.logsumexp(log_w - ls[i - 1])
+        if weighting == "bma":
+            ## ==== COMPUTATION OF ENSEMBLE WEIGHTS USING ONLINE BMA ===== ##
+            def _step_weights(carry, i):
+                # Mark as inactive
+                log_w = jnp.where(carry < jnp.log(min_weight), -jnp.inf, carry)
 
-            log_w = log_w + (ell - ls[i - 1])
+                ell = -jax.scipy.special.logsumexp(log_w - ls[i - 1])
 
-            return log_w, log_w
+                log_w = log_w + (ell - ls[i - 1])
 
-        final_log_w, log_ws = lax.scan(
-            _step_weights, jnp.log(self.w), jnp.arange(1, X.shape[0] + 1)
-        )
+                return log_w, log_w
 
-        log_ws = jnp.concatenate([self.w.reshape(1, -1), log_ws[:-1]], axis=0)
-        self.w = jnp.exp(final_log_w)
+            final_log_w, log_ws = lax.scan(
+                _step_weights, self.logw, jnp.arange(1, X.shape[0] + 1)
+            )
+
+            log_ws = jnp.concatenate([self.logw.reshape(1, -1), log_ws[:-1]], axis=0)  # shouldn't we concatenate the self.logw? I changed it to jnp.log(self.w)
+            ## ==== END OF COMPUTATION OF ENSEMBLE WEIGHTS ===== ##
+        elif weighting == "stacking":
+            # our li should be substituted with -ls[i - 1]
+            def _step_weights(carry, i):
+                log_w = jnp.where(carry < jnp.log(min_weight), -jnp.inf, carry)
+
+                # Exponentiated Gradients
+                log_w = log_w + alpha * jnp.exp(
+                    - ls[i - 1] - jax.scipy.special.logsumexp(log_w - ls[i - 1])
+                )
+                log_w = log_w - jax.scipy.special.logsumexp(log_w)
+
+                return log_w, log_w
+
+            final_log_w, log_ws = lax.scan(
+                    _step_weights, self.logw, jnp.arange(1, X.shape[0] + 1)
+                )
+
+            # optimized log-weights
+            log_ws = jnp.concatenate([self.logw.reshape(1, -1), log_ws[:-1]], axis=0)  # we don't consider the last weight
+
+
+
+        self.logw = final_log_w  # NEW!!
+        self.w = jnp.exp(final_log_w) # this is not used...
 
         ymean = jnp.sum(jnp.exp(log_ws) * yhat, axis=1)
         yvar = jnp.sum(
